@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 策略参数配置
-严格对标炒股养家原文的情绪驱动策略（v2.1）
+严格对标炒股养家原文的情绪驱动策略（v2.2）
 
 本文件为本地开发/维护用。
 聚宽部署版本的参数直接内联在 jqbacktest/main.py 顶部。
 
-v2.1 变更：
-  - 引入双层判断框架：第一层大盘趋势（REGIME），第二层情绪阶段（EMOTION）
-  - hot_threshold / strong_threshold 改为动态阈值，随趋势切换（见 REGIME_THRESHOLDS）
-  - trend_window: 3 → 5，让 WEAK_MID 有机会触发
+v2.2 变更：
+  - 阈值恢复固定值（HOT≥70 / STRONG≥50），不再随制度动态调整
+  - REGIME_THRESHOLDS 替换为 REGIME_POSITION_FACTOR
+    牛市 × 1.2 / 震荡 × 1.0 / 熊市 × 0.6
+  - 避免 v2.1 熊市底部反转时因阈值过低误判 HOT 而错失建仓
 """
 
 # ============================================================
@@ -26,10 +27,12 @@ EMOTION = {
     # 最高连板高度（辅助：量化游资活跃程度）
     "weight_max_boards":      0.10,
 
-    # 注：hot_threshold / strong_threshold 已移至 REGIME_THRESHOLDS（动态阈值）
+    # 情绪阶段判断阈值（固定值，不随制度动态变化）
+    "hot_threshold":    70,  # 评分 >= 70 → 过热高潮
+    "strong_threshold": 50,  # 评分 >= 50 → 赚钱效应
 
     # 弱势三阶段判断：当日分数 vs 近N日均值的差值
-    "trend_window":  5,      # 扩大至5日，让WEAK_MID有机会出现（v2.1改动）
+    "trend_window":  5,      # 扩大至5日，让WEAK_MID有机会出现
     "trend_rising":  3.0,   # 差值 >  3 → 弱势末期（情绪回升）
     "trend_falling": -3.0,  # 差值 < -3 → 弱势初期（情绪恶化）
                             # 介于两者    → 弱势中期（情绪平稳）
@@ -45,11 +48,12 @@ REGIME = {
                              # 介于两者               → 震荡
 }
 
-# 各趋势下的情绪阈值（解决"牛市被过热判断压制"问题）
-REGIME_THRESHOLDS = {
-    "BULL":    {"hot_threshold": 85, "strong_threshold": 55},
-    "NEUTRAL": {"hot_threshold": 75, "strong_threshold": 50},
-    "BEAR":    {"hot_threshold": 65, "strong_threshold": 45},
+# 制度仓位乘数（制度影响仓位上限，不影响阈值判断）
+# 牛市加仓、熊市减仓，但不改变买入/不买入的判断边界
+REGIME_POSITION_FACTOR = {
+    "BULL":    1.2,  # 牛市：仓位上限 × 1.2（STRONG 80% → 96%）
+    "NEUTRAL": 1.0,  # 震荡：维持原逻辑
+    "BEAR":    0.6,  # 熊市：仓位上限 × 0.6（STRONG 80% → 48%）
 }
 
 # ============================================================

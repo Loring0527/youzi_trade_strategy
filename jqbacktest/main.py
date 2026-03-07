@@ -10,12 +10,17 @@
     第一层：大盘趋势（宏观）→ 牛市 / 震荡 / 熊市
     第二层：当日情绪（微观）→ 在趋势背景下判断赚钱/亏钱效应
 
-  情绪阶段（阈值随大盘趋势动态调整）：
+  情绪阶段（阈值固定，制度影响仓位乘数而非阈值）：
     弱势初期 → 极轻仓低吸，止损更严（-5%）
     弱势中期 → 专注超跌股（更深回调 + 量缩至极）
     弱势末期 → 布局强势个股，可小仓位追涨
     赚钱效应 → 追涨热点为主
     过热高潮 → 不开新仓，持仓逐步减仓
+
+  制度仓位乘数（REGIME_POSITION_FACTOR）：
+    牛市 × 1.2 → 可更满仓（STRONG 上限 80% → 96%）
+    震荡 × 1.0 → 维持原逻辑
+    熊市 × 0.6 → 减半仓但仍可买入（STRONG 上限 80% → 48%）
 
 使用方法：
   将本文件全部内容粘贴到聚宽策略编辑器中，设置回测时间后运行。
@@ -25,6 +30,7 @@
   v1.1 - API修正：时序Bug修复、批量get_price、合并涨跌停查询
   v2.0 - 逻辑重构：严格对标炒股养家原文，弱势三阶段，各阶段独立参数
   v2.1 - 双层框架：大盘趋势判断层 + 动态情绪阈值
+  v2.2 - 修正框架：阈值固定（HOT≥70/STRONG≥50），制度只影响仓位乘数
 """
 
 from jqdata import *
@@ -77,6 +83,10 @@ EMOTION_PARAMS = {
     # 最高连板高度（辅助：量化游资活跃程度）
     "weight_max_boards":      0.10,
 
+    # 情绪阶段判断阈值（固定值，不随制度动态变化）
+    "hot_threshold":    70,  # 评分 >= 70 → 过热高潮
+    "strong_threshold": 50,  # 评分 >= 50 → 赚钱效应
+
     # 弱势三阶段判断：当日分数 vs 近N日均值的差值
     "trend_window":  5,      # 扩大至5日，让WEAK_MID有机会出现
     "trend_rising":  3.0,    # 差值 >  3 → 弱势末期（情绪回升）
@@ -92,11 +102,12 @@ REGIME_PARAMS = {
                              # 介于两者               → 震荡
 }
 
-# 各趋势下的情绪阈值（动态调整，解决"牛市被过热判断压制"问题）
-REGIME_THRESHOLDS = {
-    REGIME_BULL:    {"hot_threshold": 85, "strong_threshold": 55},
-    REGIME_NEUTRAL: {"hot_threshold": 75, "strong_threshold": 50},
-    REGIME_BEAR:    {"hot_threshold": 65, "strong_threshold": 45},
+# 制度仓位乘数（制度影响仓位上限，阈值保持固定）
+# 牛市加仓、熊市减仓，但不改变买入/不买入的判断边界
+REGIME_POSITION_FACTOR = {
+    REGIME_BULL:    1.2,  # 牛市：仓位上限 × 1.2（STRONG 80% → 96%）
+    REGIME_NEUTRAL: 1.0,  # 震荡：维持原逻辑
+    REGIME_BEAR:    0.6,  # 熊市：仓位上限 × 0.6（STRONG 80% → 48%）
 }
 
 # 各阶段总仓位上限
@@ -233,7 +244,7 @@ def initialize(context):
     context.verbose          = True
 
     run_daily(execute_trades, time="open")
-    log.info("=== YouZi_EmotionDriven_v2.1 初始化完成 ===")
+    log.info("=== YouZi_EmotionDriven_v2.2 初始化完成 ===")
 
 
 def before_trading_start(context):
@@ -258,7 +269,7 @@ def before_trading_start(context):
         lu_list=lu_list, lu_cnt=lu_cnt, ld_cnt=ld_cnt,
     )
     score_history = [r[1] for r in context.emotion_records]
-    phase         = _classify_phase(score, score_history, context.market_regime)
+    phase         = _classify_phase(score, score_history)
 
     prev_phase            = context.emotion_phase
     context.emotion_phase = phase
@@ -271,10 +282,11 @@ def before_trading_start(context):
     record(emotion_score=score, emotion_phase=phase_idx)
 
     if context.verbose:
-        regime_str = REGIME_CN.get(context.market_regime, context.market_regime)
-        regime_chg = " ←趋势切换!" if context.market_regime != prev_regime else ""
+        regime_str    = REGIME_CN.get(context.market_regime, context.market_regime)
+        regime_chg    = " ←趋势切换!" if context.market_regime != prev_regime else ""
+        pos_factor    = REGIME_POSITION_FACTOR.get(context.market_regime, 1.0)
         log.info(
-            f"[趋势] {regime_str}{regime_chg} | "
+            f"[趋势] {regime_str}{regime_chg}（仓位×{pos_factor}） | "
             f"[情绪] 基于{prev_date} | 评分={score:.1f} | "
             f"阶段={PHASE_CN.get(phase, phase)}"
             f"{' ←切换!' if phase != prev_phase else ''} | "
@@ -519,23 +531,20 @@ def _detect_market_regime(date):
         return REGIME_NEUTRAL
 
 
-def _classify_phase(score, score_history, regime=REGIME_NEUTRAL):
+def _classify_phase(score, score_history):
     """
-    五阶段分类（双层框架）
+    五阶段分类
 
-    第一层（regime）决定动态阈值：
-      牛市   → HOT ≥ 85，STRONG ≥ 55
-      震荡   → HOT ≥ 75，STRONG ≥ 50
-      熊市   → HOT ≥ 65，STRONG ≥ 45
+    阈值固定（不随制度变化）：
+      HOT ≥ 70    → 过热高潮
+      STRONG ≥ 50 → 赚钱效应
+      < 50        → 弱势三阶段（按趋势方向区分初/中/末期）
 
-    第二层（score + trend）决定具体阶段：
-      >= hot_threshold    → 过热高潮
-      >= strong_threshold → 赚钱效应
-      < strong_threshold  → 弱势三阶段（按趋势方向区分初/中/末期）
+    制度（REGIME）只影响仓位乘数（见 REGIME_POSITION_FACTOR），不影响此处判断。
     """
-    thresholds = REGIME_THRESHOLDS.get(regime, REGIME_THRESHOLDS[REGIME_NEUTRAL])
-    hot_th     = thresholds["hot_threshold"]
-    strong_th  = thresholds["strong_threshold"]
+    ep        = EMOTION_PARAMS
+    hot_th    = ep["hot_threshold"]
+    strong_th = ep["strong_threshold"]
 
     if score >= hot_th:
         return PHASE_HOT
@@ -807,7 +816,9 @@ def _generate_buy_signals(context, universe, prev_date, phase):
     total_value   = context.portfolio.total_value
     current_count = len(context.portfolio.positions)
     existing      = set(context.portfolio.positions.keys())
-    phase_limit   = POSITION_PARAMS["max_position_by_phase"].get(phase, 0.20)
+    regime_factor = REGIME_POSITION_FACTOR.get(context.market_regime, 1.0)
+    phase_limit   = POSITION_PARAMS["max_position_by_phase"].get(phase, 0.20) * regime_factor
+    phase_limit   = min(phase_limit, 1.0)
     max_stocks    = POSITION_PARAMS["max_stock_count"]
 
     used_ratio = 1 - context.portfolio.cash / total_value if total_value > 0 else 1
