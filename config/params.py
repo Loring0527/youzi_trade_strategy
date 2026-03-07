@@ -1,10 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 策略参数配置
-严格对标炒股养家原文的情绪驱动策略（v2.0）
+严格对标炒股养家原文的情绪驱动策略（v2.1）
 
 本文件为本地开发/维护用。
 聚宽部署版本的参数直接内联在 jqbacktest/main.py 顶部。
+
+v2.1 变更：
+  - 引入双层判断框架：第一层大盘趋势（REGIME），第二层情绪阶段（EMOTION）
+  - hot_threshold / strong_threshold 改为动态阈值，随趋势切换（见 REGIME_THRESHOLDS）
+  - trend_window: 3 → 5，让 WEAK_MID 有机会触发
 """
 
 # ============================================================
@@ -21,15 +26,30 @@ EMOTION = {
     # 最高连板高度（辅助：量化游资活跃程度）
     "weight_max_boards":      0.10,
 
-    # 强势/弱势分界
-    "hot_threshold":    70,  # >= 70 → 过热高潮
-    "strong_threshold": 50,  # >= 50 → 赚钱效应；< 50 → 弱势三阶段
+    # 注：hot_threshold / strong_threshold 已移至 REGIME_THRESHOLDS（动态阈值）
 
     # 弱势三阶段判断：当日分数 vs 近N日均值的差值
-    "trend_window":  3,
+    "trend_window":  5,      # 扩大至5日，让WEAK_MID有机会出现（v2.1改动）
     "trend_rising":  3.0,   # 差值 >  3 → 弱势末期（情绪回升）
     "trend_falling": -3.0,  # 差值 < -3 → 弱势初期（情绪恶化）
                             # 介于两者    → 弱势中期（情绪平稳）
+}
+
+# ============================================================
+# 大盘趋势判断参数（第一层：宏观）
+# ============================================================
+REGIME = {
+    "ma_period":      60,    # 均线周期
+    "bull_threshold": 1.05,  # CSI300 > MA60 × 105% → 牛市
+    "bear_threshold": 0.95,  # CSI300 < MA60 × 95%  → 熊市
+                             # 介于两者               → 震荡
+}
+
+# 各趋势下的情绪阈值（解决"牛市被过热判断压制"问题）
+REGIME_THRESHOLDS = {
+    "BULL":    {"hot_threshold": 85, "strong_threshold": 55},
+    "NEUTRAL": {"hot_threshold": 75, "strong_threshold": 50},
+    "BEAR":    {"hot_threshold": 65, "strong_threshold": 45},
 }
 
 # ============================================================

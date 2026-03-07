@@ -6,13 +6,16 @@
 适用平台：聚宽（JoinQuant）回测
 
 核心理念（严格对标炒股养家原文）：
-  1. 每日判断市场是否存在「赚钱效应」或「亏钱效应」
-  2. 亏钱效应（弱势市场）分三期：
-       弱势初期 → 极轻仓低吸，止损更严（-5%）
-       弱势中期 → 专注超跌股（更深回调 + 量缩至极）
-       弱势末期 → 布局强势个股，可小仓位追涨
-  3. 赚钱效应（强势市场）→ 追涨热点为主
-  4. 过热高潮 → 不开新仓，持仓逐步减仓
+  双层判断框架：
+    第一层：大盘趋势（宏观）→ 牛市 / 震荡 / 熊市
+    第二层：当日情绪（微观）→ 在趋势背景下判断赚钱/亏钱效应
+
+  情绪阶段（阈值随大盘趋势动态调整）：
+    弱势初期 → 极轻仓低吸，止损更严（-5%）
+    弱势中期 → 专注超跌股（更深回调 + 量缩至极）
+    弱势末期 → 布局强势个股，可小仓位追涨
+    赚钱效应 → 追涨热点为主
+    过热高潮 → 不开新仓，持仓逐步减仓
 
 使用方法：
   将本文件全部内容粘贴到聚宽策略编辑器中，设置回测时间后运行。
@@ -21,6 +24,7 @@
   v1.0 - 骨架搭建：情绪指数 + 低吸 + 追涨 + 仓位管理
   v1.1 - API修正：时序Bug修复、批量get_price、合并涨跌停查询
   v2.0 - 逻辑重构：严格对标炒股养家原文，弱势三阶段，各阶段独立参数
+  v2.1 - 双层框架：大盘趋势判断层 + 动态情绪阈值
 """
 
 from jqdata import *
@@ -46,6 +50,17 @@ PHASE_CN = {
     PHASE_HOT:        "过热高潮",
 }
 
+# 大盘趋势常量
+REGIME_BULL    = "BULL"     # 牛市
+REGIME_NEUTRAL = "NEUTRAL"  # 震荡
+REGIME_BEAR    = "BEAR"     # 熊市
+
+REGIME_CN = {
+    REGIME_BULL:    "牛市",
+    REGIME_NEUTRAL: "震荡",
+    REGIME_BEAR:    "熊市",
+}
+
 
 # ============================================================
 # 策略参数
@@ -62,15 +77,26 @@ EMOTION_PARAMS = {
     # 最高连板高度（辅助：量化游资活跃程度）
     "weight_max_boards":      0.10,
 
-    # 强势/弱势分界
-    "hot_threshold":    70,  # >= 70 → 过热
-    "strong_threshold": 50,  # >= 50 → 赚钱效应；< 50 → 弱势三阶段
-
     # 弱势三阶段判断：当日分数 vs 近N日均值的差值
-    "trend_window":  3,
-    "trend_rising":  3.0,   # 差值 >  3 → 弱势末期（情绪回升）
-    "trend_falling": -3.0,  # 差值 < -3 → 弱势初期（情绪恶化）
-                            # 介于两者    → 弱势中期（情绪平稳）
+    "trend_window":  5,      # 扩大至5日，让WEAK_MID有机会出现
+    "trend_rising":  3.0,    # 差值 >  3 → 弱势末期（情绪回升）
+    "trend_falling": -3.0,   # 差值 < -3 → 弱势初期（情绪恶化）
+                             # 介于两者    → 弱势中期（情绪平稳）
+}
+
+# 大盘趋势判断参数（第一层：宏观）
+REGIME_PARAMS = {
+    "ma_period":      60,    # 均线周期
+    "bull_threshold": 1.05,  # CSI300 > MA60 × 105% → 牛市
+    "bear_threshold": 0.95,  # CSI300 < MA60 × 95%  → 熊市
+                             # 介于两者               → 震荡
+}
+
+# 各趋势下的情绪阈值（动态调整，解决"牛市被过热判断压制"问题）
+REGIME_THRESHOLDS = {
+    REGIME_BULL:    {"hot_threshold": 85, "strong_threshold": 55},
+    REGIME_NEUTRAL: {"hot_threshold": 75, "strong_threshold": 50},
+    REGIME_BEAR:    {"hot_threshold": 65, "strong_threshold": 45},
 }
 
 # 各阶段总仓位上限
@@ -200,13 +226,14 @@ def initialize(context):
     context.emotion_records  = []            # [(date_str, score, phase), ...]
     context.emotion_phase    = PHASE_WEAK_MID
     context.emotion_score    = 40.0
+    context.market_regime    = REGIME_NEUTRAL  # 大盘趋势（第一层）
     context.position_records = {}            # {stock: {max_price, hold_days, entry_date}}
     context.buy_signals      = []
     context.sell_signals     = []
     context.verbose          = True
 
     run_daily(execute_trades, time="open")
-    log.info("=== YouZi_EmotionDriven_v2 初始化完成 ===")
+    log.info("=== YouZi_EmotionDriven_v2.1 初始化完成 ===")
 
 
 def before_trading_start(context):
@@ -220,14 +247,18 @@ def before_trading_start(context):
         return
     prev2_date = trade_days[0]
 
-    # ── Step 1: 计算昨日市场情绪评分 ──────────────────────────
+    # ── Step 1a: 判断大盘趋势（第一层：宏观）─────────────────
+    prev_regime           = context.market_regime
+    context.market_regime = _detect_market_regime(prev_date)
+
+    # ── Step 1b: 计算昨日市场情绪评分（第二层：微观）─────────
     lu_list, lu_cnt, ld_cnt = _get_market_limit_data(prev_date)
     score = _calc_emotion_score(
         date=prev_date, prev2_date=prev2_date,
         lu_list=lu_list, lu_cnt=lu_cnt, ld_cnt=ld_cnt,
     )
     score_history = [r[1] for r in context.emotion_records]
-    phase         = _classify_phase(score, score_history)
+    phase         = _classify_phase(score, score_history, context.market_regime)
 
     prev_phase            = context.emotion_phase
     context.emotion_phase = phase
@@ -240,7 +271,10 @@ def before_trading_start(context):
     record(emotion_score=score, emotion_phase=phase_idx)
 
     if context.verbose:
+        regime_str = REGIME_CN.get(context.market_regime, context.market_regime)
+        regime_chg = " ←趋势切换!" if context.market_regime != prev_regime else ""
         log.info(
+            f"[趋势] {regime_str}{regime_chg} | "
             f"[情绪] 基于{prev_date} | 评分={score:.1f} | "
             f"阶段={PHASE_CN.get(phase, phase)}"
             f"{' ←切换!' if phase != prev_phase else ''} | "
@@ -455,28 +489,61 @@ def _max_consecutive_boards(date, lu_list, sample_size=40):
     return max_boards
 
 
-def _classify_phase(score, score_history):
+def _detect_market_regime(date):
     """
-    五阶段分类（对标炒股养家原文）
+    判断大盘趋势（第一层：宏观）
+    基于沪深300相对60日均线的位置
 
-    强势/弱势由分数绝对值决定：
-      >= hot_threshold    → 过热
-      >= strong_threshold → 赚钱效应（STRONG）
-      < strong_threshold  → 弱势区间
-
-    弱势三阶段由近N日趋势方向决定：
-      情绪回升  → 弱势末期（末期布局）
-      情绪恶化  → 弱势初期（轻仓止损）
-      情绪平稳  → 弱势中期（超跌为主）
+    返回：REGIME_BULL / REGIME_NEUTRAL / REGIME_BEAR
     """
-    ep = EMOTION_PARAMS
+    try:
+        p      = REGIME_PARAMS
+        prices = get_price(
+            "000300.XSHG", end_date=date,
+            count=p["ma_period"],
+            fields=["close"], frequency="daily",
+        )
+        if prices is None or len(prices) < p["ma_period"]:
+            return REGIME_NEUTRAL
 
-    if score >= ep["hot_threshold"]:
+        current = float(prices["close"].iloc[-1])
+        ma60    = float(prices["close"].mean())
+
+        if current > ma60 * p["bull_threshold"]:
+            return REGIME_BULL
+        elif current < ma60 * p["bear_threshold"]:
+            return REGIME_BEAR
+        else:
+            return REGIME_NEUTRAL
+    except Exception:
+        return REGIME_NEUTRAL
+
+
+def _classify_phase(score, score_history, regime=REGIME_NEUTRAL):
+    """
+    五阶段分类（双层框架）
+
+    第一层（regime）决定动态阈值：
+      牛市   → HOT ≥ 85，STRONG ≥ 55
+      震荡   → HOT ≥ 75，STRONG ≥ 50
+      熊市   → HOT ≥ 65，STRONG ≥ 45
+
+    第二层（score + trend）决定具体阶段：
+      >= hot_threshold    → 过热高潮
+      >= strong_threshold → 赚钱效应
+      < strong_threshold  → 弱势三阶段（按趋势方向区分初/中/末期）
+    """
+    thresholds = REGIME_THRESHOLDS.get(regime, REGIME_THRESHOLDS[REGIME_NEUTRAL])
+    hot_th     = thresholds["hot_threshold"]
+    strong_th  = thresholds["strong_threshold"]
+
+    if score >= hot_th:
         return PHASE_HOT
-    if score >= ep["strong_threshold"]:
+    if score >= strong_th:
         return PHASE_STRONG
 
     # 弱势区间：用趋势方向区分三阶段
+    ep     = EMOTION_PARAMS
     window = ep["trend_window"]
     if len(score_history) >= window:
         recent_avg = float(np.mean(score_history[-window:]))
