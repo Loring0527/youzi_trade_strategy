@@ -348,7 +348,8 @@ def execute_trades(context):
 
 
 # ============================================================
-# 情绪指数计算
+# 情绪评分 [→ strategy/emotion.py]
+# 对标模块：calc_emotion_score / classify_phase
 # ============================================================
 
 def _get_market_limit_data(date):
@@ -569,6 +570,12 @@ def _classify_phase(score, score_history):
 
 
 # ============================================================
+# 趋势判断 [→ strategy/regime.py]
+# 对标模块：detect_market_regime / get_position_factor
+# ============================================================
+# （_detect_market_regime 在上方情绪评分区块中定义）
+
+# ============================================================
 # 股票池构建
 # ============================================================
 
@@ -585,8 +592,11 @@ def _get_universe(date):
 
 
 # ============================================================
-# 低吸候选股筛选（弱势初期/中期/末期共用，参数各异）
+# 选股信号 [→ strategy/signals.py]
+# 对标模块：filter_dip_candidates / filter_momentum_candidates / generate_buy_signals
 # ============================================================
+
+# ── 低吸候选股筛选（弱势初期/中期/末期共用，参数各异）─────────
 
 def _filter_dip_candidates(universe, prev_date, params):
     """
@@ -715,9 +725,7 @@ def _score_dip_from_df(stock, prices, p):
     }
 
 
-# ============================================================
-# 追涨候选股筛选（STRONG / WEAK_LATE 追涨部分）
-# ============================================================
+# ── 追涨候选股筛选（STRONG / WEAK_LATE 追涨部分）─────────────
 
 def _filter_momentum_candidates(universe, prev_date, params):
     """
@@ -799,9 +807,7 @@ def _filter_momentum_candidates(universe, prev_date, params):
     )
 
 
-# ============================================================
-# 信号生成
-# ============================================================
+# ── 信号生成 ─────────────────────────────────────────────────
 
 def _generate_buy_signals(context, universe, prev_date, phase):
     """
@@ -1021,7 +1027,8 @@ def _generate_sell_signals(context):
 
 
 # ============================================================
-# 持仓记录管理
+# 仓位管理 [→ strategy/position.py]
+# 对标模块：generate_sell_signals / update_position_records / get_stop_loss
 # ============================================================
 
 def _update_position_records(context):
